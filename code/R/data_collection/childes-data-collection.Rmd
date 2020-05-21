@@ -1,0 +1,220 @@
+---
+title: "childes-data-collection"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library("childesr")
+library("tm")
+library("tidyverse")
+
+theme_set(theme_classic())
+
+```
+
+Get all the transcript information from CHILDES and filter for transcripts in the selected language and for child names listed in the appendix on McCauley and Christiansen (2019) (They only provide the child name and full article reference for the subset of corpora used in each language, not the actual corpus names)
+```{r gettranscripts, eval=FALSE}
+df.transcripts <- get_transcripts()
+
+lang = "eng"
+# "Jilly", "Nai" and "Nic" were not available through childesr
+child_names_eng <- c("Abe", "Adam", "Alex", "Anne", "Aran", "Barbara", "Becky", "Carl", "Conor", "David", "Dominic", "Emily", "Emma", "Ethan", "Eve", "Gail", "Jimmy", "Joel", "John", "Lara", "Lily", "Liz", "Matt", "Michelle", "Naomi", "Nathaniel", "Nina", "Peter", "Roman", "Ross", "Ruth", "Sarah", "Seth", "Shem", "Thomas", "Tow", "Trevor", "Violet", "Warren", "Will")
+
+df.transcripts_eng <- df.transcripts %>%
+  filter(target_child_name %in% child_names_eng & language == lang)
+
+```
+
+Get all the utterances for the selected transcripts.
+```{r, eval=FALSE}
+my_get_utterances = function(corpus_name, target_child_name) {
+  return(get_utterances(corpus = corpus_name, target_child = target_child_name))
+}
+
+df.utterances_eng_all = df.transcripts_eng %>%
+  group_by(corpus_name) %>%
+  distinct(target_child_name)  %>%
+  pmap(my_get_utterances) %>%
+  reduce(rbind)
+
+```
+
+
+Given that there are multiple children with each name from different corpora, I need to only keep the one which the largest amount of tokens according to M & C's paper, which is equivalent to the one with the most utterances. So for each child name and for each different corpus, calculate the total number of utterances and filter to only keep the child for each name with the most utterances.
+```{r, eval=FALSE}
+df.utterances_eng_final = df.utterances_eng_all %>%
+  ungroup() %>%
+  group_by(target_child_name, corpus_name) %>%
+  mutate(nb_utterances = n()) %>%
+  ungroup() %>%
+  group_by(target_child_name) %>%
+  mutate(max_nb_bychildname = max(nb_utterances)) %>%
+  filter(nb_utterances == max_nb_bychildname) %>%
+  select(-max_nb_bychildname) %>%
+  ungroup()
+```
+
+For each utterance, remove all punctuation including apostrophes, following M & C's data description, and add final punctuation since they kept it in their cleaned transcripts. I don't think their model actually cares about the final punctuation since they end up removing it when they process the sentences, but given that they had both '.' and '?' in their example transcript, I have added both of these depending on the sentence type. Finally, I add '*CHI: ' or the equivalent speaker code for each utterance to the beginning of the string to match the formatting used by M & C. Their model does string matching on the speaker code to determine if an utterance was produced by the target child or not.
+```{r, eval=FALSE}
+df.CBL_strings_eng_final = df.utterances_eng_final %>%
+  mutate(gloss_cleaned = ifelse(is.na(stem) | stem =="", NA, removePunctuation(gloss))) %>%
+  mutate(finalpunc = ifelse(grepl("question", type, fixed=TRUE),
+                            "?", ".")) %>%
+  mutate(CBL_string = ifelse(!is.na(gloss_cleaned),
+                             paste("*", speaker_code, ": ", gloss_cleaned, " ", finalpunc, sep=""), NA))
+
+```
+
+Write a separate file for each child transcript to be read in by M & C's model.
+```{r, eval=FALSE}  
+my_write_CBL_transcripts <- function(df){
+   child_name = df$target_child_name[1]
+   df %>%
+     filter(!is.na(CBL_string)) %>%
+     select(CBL_string) %>%
+   write.table(., file=paste("../../../data/transcripts/" lang, "/", child_name, ".capp", sep =""), quote = FALSE, col.names = FALSE, row.names = FALSE)
+   return(df)
+}
+
+df.CBL_strings_eng_final %>%
+  select(target_child_name, CBL_string) %>%
+  group_by(target_child_name) %>%
+  do(my_write_CBL_transcripts(.))
+```
+
+Get the age range for all target children 
+```{r get_age}
+## Age of child at child utterance production
+df.ages_child = df.utterances_eng_final %>% 
+  filter(speaker_code == "CHI") %>% 
+  select(target_child_name, target_child_age) %>% 
+  mutate(age_round = round(target_child_age, digits = 2)) %>% 
+  group_by(target_child_name) %>% 
+  mutate(age_mean_bychild = mean(age_round, na.rm = TRUE))
+
+## Age of child at child-directed utterance production
+df.ages_child = df.utterances_eng_final %>% 
+  filter(speaker_code != "CHI") %>% 
+  select(target_child_name, target_child_age) %>% 
+  mutate(age_round = round(target_child_age, digits = 2)) %>% 
+  group_by(target_child_name) %>% 
+  mutate(age_mean_bychild = mean(age_round, na.rm = TRUE))
+
+p = ggplot(df.ages_child, aes(x=age_round)) +
+  geom_density(adjust = 2)+
+  xlab("Age of children (in months)")+
+  #ggtitle("Age distribution across utterances") +
+  theme(text=element_text(size=14,  family="Times New Roman"), legend.title = element_text( size = 14), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+
+ggsave("age_bychild-directed.png", plot=p, width=5.5, height=3.7, units="in") 
+
+```
+
+Get the age range distribution by corpus
+```{r age_bycorpus}
+ggplot(df.ages_child, aes(x=age_round, group=target_child_name)) +
+  geom_density(adjust = 2)+
+  facet_wrap(vars(target_child_name))+
+  ylab("") +
+  xlab("Age of children (in months)")+
+  ggtitle("Age distribution of utterances by child") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 12), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+```
+
+Get the sentence length distribution
+```{r sent_len_dist}
+df.length_counts = df.utterances_eng_final %>% 
+  select(target_child_name, speaker_code, num_tokens) %>% 
+  mutate(speaker_code = ifelse(speaker_code=="CHI"|speaker_code=="Child", "Child", "Child-directed")) %>% 
+  group_by(target_child_name, speaker_code, num_tokens) %>% 
+  mutate(count = n()) %>% 
+  unique()
+  
+df.length_avg = df.length_counts %>% 
+  ungroup() %>% group_by(speaker_code, num_tokens) %>% 
+  mutate(mean_count = sum(count)/40) %>% 
+  select(speaker_code, num_tokens, mean_count) %>% 
+  unique()
+  
+
+
+ggplot(df.length_avg, aes(x=num_tokens, y=mean_count, colour=speaker_code)) +
+  geom_line()+
+  ylab("Avg nb of utterances") +
+  xlab("Nb of tokens")+
+  ggtitle("Average counts for each utterance length for all corpora") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 12), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+
+p = ggplot(filter(df.length_avg, num_tokens<=10 & num_tokens>=2) , aes(x=num_tokens, y=mean_count, color=speaker_code)) +
+  geom_line(size=2)+
+  scale_x_continuous(breaks = c(2,3,4,5,6,7,8,9,10))+
+  ylab("") +
+  xlab("utterance length in tokens")+
+  scale_color_discrete(name = "Production") +
+  ggtitle("Average counts for each utterance length") +
+  theme(text=element_text(size=16, family="Times New Roman"), legend.title = element_text( size = 16), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+
+
+
+ggsave("sent_length_poster.png", plot=p, width=5.5, height=3.7, units="in") 
+```
+
+Get the sentence length distribution by corpus
+```{r sent_bycorpus}
+
+ggplot(filter(df.length_counts, target_child_name!="Thomas") , aes(x=num_tokens,y=count, colour=speaker_code)) +
+  geom_line()+
+  facet_wrap(vars(target_child_name))+
+  ylab("Nb of utterances") +
+  xlab("Nb of tokens")+
+  ggtitle("Distribution over utterance length by corpus") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 12), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+  
+
+p=ggplot(filter(df.length_counts, (target_child_name!="Will" & target_child_name!="Thomas") & num_tokens<=16 & num_tokens>=2) , aes(x=num_tokens,y=count, linetype=speaker_code)) +
+  geom_line()+
+  facet_wrap(vars(target_child_name), ncol= 4)+
+  ylab("") +
+  xlab("utterance length (n tokens)")+
+  scale_y_continuous(limits = c(0, 12000))+
+  scale_linetype_discrete(name = "Speaker") +
+  ggtitle("Distribution over utterance length by corpus between 2 and 16 words") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 12), legend.position = c(0.85, 0.0), plot.title = element_text(hjust = 0.5))
+
+```
+
+Thomas only 
+```{r sent_thomas}
+ggplot(filter(df.length_counts, target_child_name=="Thomas") , aes(x=num_tokens,y=count, colour=speaker_code)) +
+  geom_line()+
+  facet_wrap(vars(target_child_name))+
+  ylab("Nb of utterances") +
+  xlab("Nb of tokens")+
+  ggtitle("Distribution over utterance length for Thomas corpus ") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 12), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+  
+
+p=ggplot(filter(df.length_counts, target_child_name=="Thomas" & num_tokens<=16 & num_tokens>=2) , aes(x=num_tokens,y=count, linetype=speaker_code)) +
+  geom_line()+
+  facet_wrap(vars(target_child_name), ncol= 4)+
+  ylab("utterance count") +
+  xlab("utterance length (n tokens)")+
+  scale_linetype_discrete(name = "Speaker") +
+  ggtitle("Distribution over utterance length by corpus between 2 and 16 words") +
+  theme(text=element_text(size=13,  family="Times New Roman"), legend.title = element_text( size = 14), legend.position = c(0.85, 0.7), plot.title = element_text(hjust = 0.5))
+```
+Get vocabulary size (maybe do this as part of python code.)
+
+```{r vocab_size}
+df.vocab_size= read.csv("../../../data/results/token_counts_eng.csv")
+df.vocab_size = df.vocab_size %>%  filter(file!="Will") %>% mutate(total_tokens= train_tokens+test_tokens)
+
+p=ggplot(df.vocab_size, aes(x=log(total_tokens), y = log(vocab_size))) +
+  geom_point(size=2)+
+  geom_smooth(method = "lm")+
+  ylab("log(vocabulary size in tokens)") +
+  xlab("log(corpus size in number of tokens)")+
+  ggtitle("Vocabulary size in relation to corpus size") +
+  theme(text=element_text(size=14,  family="Times New Roman"), plot.title = element_text(hjust = 0.5))
+```

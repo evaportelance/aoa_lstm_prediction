@@ -1,0 +1,261 @@
+---
+title: "predict_AoA_megachild"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tools)
+library(glue)
+library(broom)
+library(stringr)
+library(corrplot)
+library(car)
+library(tidyverse)
+library(lme4)
+library(modelr)
+library(purrr)
+
+
+theme_set(theme_classic())
+
+
+
+```
+
+
+Load the data
+```{r data}
+load("../../../data/aoa_predictors/data_mega_child.RData")
+```
+
+All the models to fit 
+
+```{r formulae}
+
+full_surp = ~ lexical_category * avg_surprisal + lexical_category * avg_freq + lexical_category * num_phons + lexical_category * concreteness + lexical_category * valence + lexical_category * arousal + lexical_category * babiness
+
+freq_surp = ~ lexical_category * avg_freq + lexical_category * avg_surprisal
+
+full_set = ~ lexical_category * avg_freq + lexical_category *  num_phons + lexical_category * concreteness + lexical_category * valence + lexical_category * arousal + lexical_category * babiness
+
+freq_only = ~ lexical_category * avg_freq
+
+full_surp_only = ~ lexical_category * avg_surprisal + lexical_category * num_phons + lexical_category * concreteness + lexical_category * valence + lexical_category * arousal + lexical_category * babiness
+
+surp_only = ~ lexical_category * avg_surprisal
+
+null_model = ~ 1
+
+formulae <- formulas(~aoa, null_model, full_set, freq_only, full_surp, freq_surp, surp_only, full_surp_only)
+
+
+```
+
+Run cross validation for all models
+```{r cv}
+
+loo_data <- crossv_loo(ungroup(data))
+  
+fit_models <- function(id) {
+  models <- "no model"
+  #print("run model")
+  train_idx <- loo_data[id,1][[1]][[1]]$idx
+  test_idx <- loo_data[id,2][[1]][[1]]$idx
+  train_data <- data[train_idx,]
+  try(models <- fit_with(train_data, lm, formulae))
+  
+  result <- enframe(models) %>% 
+    mutate(model = value,
+      train = list(train_idx),
+    test = list(test_idx)) %>% 
+    select(-c(value))
+  
+  return(result)
+  
+}
+
+
+models_loo<- loo_data$.id %>% map( ~ fit_models(.)) %>% reduce(rbind)
+
+
+get_aoa_pred<- function(n){
+   row <- tibble(
+     name = models_loo$name[n],
+     test = models_loo$test[n],
+     train = models_loo$train[n],
+     model = models_loo$model[n],
+     test_word = data$words[as.numeric(test)],
+     lexical_category = data$lexical_category[as.numeric(test)],
+    aoa = data$aoa[as.numeric(test)],
+    aoa_pred = predict(model[[1]],  data[as.numeric(test),]))
+  return(row)
+}
+
+
+sep_models_loo <- map(c(1:nrow(models_loo)), get_aoa_pred) %>% bind_rows() %>% 
+  mutate(abs_dev = abs(aoa - aoa_pred)) %>% 
+  mutate(se = abs_dev^2)
+
+
+ results <- sep_models_loo %>% 
+  transform(abs_dev = as.numeric(abs_dev)) %>% 
+  group_by(name) %>%
+  summarise(mean_abs_dev = mean(abs_dev), sd_abs_dev = sd(abs_dev), rmse = sqrt(mean(se)), mse = mean(se)) %>% 
+  mutate(ci_mad = 1.96*(sd_abs_dev/sqrt(314))) %>% 
+  mutate(ci_mad_min = mean_abs_dev - ci_mad) %>% 
+  mutate(ci_mad_max = mean_abs_dev + ci_mad)
+  
+```
+
+
+Compare model performance by word
+```{r byword}
+test <- sep_models_loo %>% filter(name %in% c("full_set", "full_surp")) %>% 
+  group_by(name, test_word, lexical_category) %>% summarise(mean(abs_dev)) %>% 
+  spread(key=name, value="mean(abs_dev)" ) %>% 
+  mutate(diff = full_set-full_surp) %>% 
+  arrange(desc(diff))
+
+plot_data = test
+p = ggplot(data = plot_data %>% arrange(desc(diff)) %>% head(50) , 
+            aes(x = reorder(test_word,diff), y = diff, fill=lexical_category)) +
+  geom_bar(stat='identity') +
+  coord_flip()+
+  scale_fill_manual(values=c( "#D41159","#1A85FF","#BADF86"), labels=c("nouns", "function words", "predicates"), name="Lexical category") +
+#  scale_fill_discrete(name = "Lexical category", labels = c("nouns", "function words", "predicates"))+
+  labs(x="", y="difference in absolute deviation") +
+  theme(text=element_text(size=18,  family="Times New Roman"), legend.title = element_text( size = 16), legend.text = element_text( size = 16), legend.position = c(0.7, 0.6), axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+#ggsave("megachild_absolutedeviation_diff_byword_top50.png",plot=p, width = 6, height = 10, units="in", limitsize = FALSE)
+
+p
+
+```
+Get counts of each lexical category in top 50 words with best decrease in mad
+```{r lexcat_counts}
+
+plot_data %>% group_by(lexical_category) %>% count()
+plot_data %>% arrange(desc(diff)) %>% head(50) %>% group_by(lexical_category) %>% count()
+plot_data %>% group_by(lexical_category) %>% summarise(mean=mean(diff))
+
+```
+
+
+
+Get correlation plot
+```{r cor_pred}
+
+cor_data <- data %>% ungroup() %>% select(avg_surprisal, avg_freq, num_phons, concreteness, valence, arousal, babiness)
+M <- cor(cor_data, method = "pearson")
+
+#cor_data <- data %>% ungroup() %>% filter(lexical_category=="nouns") %>% select(!!predictors, aoa)
+#cor(cor_data, method = "pearson")
+
+png('corrplot_megachild.png')
+corrplot(M, method="color",  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+#ggsave("corrplot_megachild.png",plot=p, width = 6, height = 5, units="in", limitsize = FALSE)
+
+```
+
+Do colinearity analysis
+```{r vif}
+
+model = lm(aoa ~ avg_surprisal + avg_freq + num_phons + concreteness + valence + arousal + babiness + lexical_category, data=data)
+car::vif(model)
+
+```
+
+
+Get coefficient estimates for freq and avg_surprisal in the best model
+```{r betas}
+get_betas <- function(n){
+  model = full_surp_models$model[n]
+  result <- tidy(model[[1]]) %>% 
+      mutate(fold = n)
+  return(result)
+  }
+
+full_surp_models= models_loo %>% filter(name=="full_surp")  
+
+full_surp_betas = map(c(1:nrow(full_surp_models)), get_betas) %>% bind_rows()
+
+full_surp_betas <- full_surp_betas %>% select(term, estimate, fold) %>% spread(key=term, value=estimate) %>% 
+  mutate(noun_surprisal = avg_surprisal,
+         fctwd_surprisal = avg_surprisal + lexical_categoryfunction_words + lexical_categoryfunction_words:avg_surprisal,
+         pred_surprisal = avg_surprisal + lexical_categorypredicates + lexical_categorypredicates:avg_surprisal,
+         noun_frequency = avg_freq,
+         fctwd_frequency = avg_freq + lexical_categoryfunction_words + lexical_categoryfunction_words:avg_freq,
+         pred_frequency = avg_freq + lexical_categorypredicates + lexical_categorypredicates:avg_freq
+         ) %>% 
+  select(noun_surprisal,fctwd_surprisal,pred_surprisal,noun_frequency, fctwd_frequency, pred_frequency) %>% 
+  gather(key="term", value="estimate") %>% 
+  separate(col=term, into=c("lexical_category", "term"), sep="_")
+
+
+
+lex.labs <- c("function words", "nouns", "predicates")
+names(lex.labs) <- c("fctwd", "noun", "pred")
+
+
+p = ggplot(full_surp_betas, aes(x = estimate, y = term, colour = term, fill=term)) +
+  facet_grid(~ lexical_category, labeller = labeller(lexical_category = lex.labs)) +
+  scale_colour_manual(values=c("#D41159","#1A85FF")) +
+  scale_fill_manual(values=c("#D41159","#1A85FF")) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dotted") +
+  geom_point(alpha=0.015, position = position_jitter(w = 0, h = 0.05), show.legend = FALSE)+
+  ggstance::stat_summaryh(geom = "point", shape=21, size=4, color="black", fun.x = mean, fun.xmin = min,fun.xmax = max, show.legend = FALSE) +
+  labs(x = "Coefficient estimate", y = "") +
+  theme(text=element_text(size=18,  family="Times New Roman"), axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16))
+
+
+
+#ggsave("estimates_megachild.png",plot=p, width = 6, height = 3, units="in", limitsize = FALSE)
+
+p
+
+```
+
+
+Get concreteness score for nouns/predicates/function words.
+
+```{r concrete}
+
+surp_model_data %>% unnest() %>% 
+  group_by(lexical_category) %>% 
+  select(concreteness, lexical_category) %>% 
+  summarise(mean_score=mean(concreteness))
+
+```
+
+
+t-test on cross-validation outputs
+```{r ttest}
+
+test <- sep_models_loo %>% filter(name %in% c("full_set", "full_surp")) %>% 
+  group_by(name, test_word, lexical_category) %>% summarise(mean(abs_dev)) %>% 
+  spread(key=name, value="mean(abs_dev)" )
+
+t.test(test$full_set, test$full_surp)
+
+
+
+```
+
+Anova augmented model comparison
+```{r anova}
+model_base <- lm(formula= aoa ~ lexical_category * avg_freq + lexical_category *  num_phons + lexical_category * concreteness + lexical_category * valence + lexical_category * arousal + lexical_category * babiness, data = data)
+
+model_aug <- lm(formula = aoa ~ lexical_category * avg_surprisal + lexical_category * avg_freq + lexical_category * num_phons + lexical_category * concreteness + lexical_category * valence + lexical_category * arousal + lexical_category * babiness, data = data)
+
+anova(model_base, model_aug)
+
+
+```
+

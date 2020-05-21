@@ -1,0 +1,45 @@
+---
+title: "AoA-prediction-helperfunctions"
+output: html_notebook
+---
+
+Get the list of words and Age-of-Acquisition (AoA) scores for a given Language and export it to csv to be used by python AoA code.
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library("tools")
+library("wordbankr") 
+library("stringr")
+library("tidyverse")
+
+
+language = "English (American)"
+form = "WS"
+```
+
+Get the list of all uni_lemmas.
+```{r words}
+
+df.items<- get_item_data(language = language, form = form) %>% 
+  filter(!is.na(uni_lemma)) %>% 
+  select(uni_lemma, num_item_id, item_id)
+```
+
+Remove any multiword lemmas and any punctuation (eg. don't -> dont).
+```{r multi}
+
+df.items_nospace <- df.items %>% 
+  filter(!str_detect(uni_lemma, " ")) %>% 
+  mutate(words = str_remove(uni_lemma, "['`]")) %>% 
+  select(words, num_item_id, item_id)
+```
+
+```{r save}
+write.table((df.items_nospace %>% select(words, num_item_id)), file=paste("../../../data/transcripts/eng/aoa_words.csv"), sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+
+```
+
+
+
+
+

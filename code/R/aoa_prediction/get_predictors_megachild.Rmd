@@ -1,0 +1,199 @@
+---
+title: "get_predictors_megachild"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tools)
+library(glue)
+library(broom)
+library(stringr)
+library(tidyverse)
+library(lme4)
+library(modelr)
+library(purrr)
+
+
+theme_set(theme_classic())
+```
+
+### Get AoA estimates
+The following is based on the appendix D from the Wordbank book (Frank et al. 2019).
+taken from: https://github.com/langcog/wordbank-book/blob/master/104-appendix-aoa.Rmd 
+I use there Bayesian GLM with hand-tuned prior parameters model to get fitted AoA estimates on the English Words & Sentences data from Wordbank. (I take their data and model as is.)
+```{r aoa_estimates}
+load("../../../data/aoa_predictors/eng_ws_raw_data.Rds")
+
+ms <- eng_ws %>%
+  group_by(definition, age, category) %>%
+  summarise(prop = mean(value == "produces", na.rm = TRUE), 
+            num_true = sum(value == "produces", na.rm = TRUE), 
+            num_false = sum(value != "produces", na.rm = TRUE), 
+            n = sum(c(num_true, num_false))) %>%
+  filter(!is.na(category))
+
+fit_bglm <- function(data) {
+  model <- arm::bayesglm(cbind(num_true, num_false) ~ age, 
+                         family = "binomial", 
+                         prior.mean = .3,
+                         prior.scale = c(.01),
+                         prior.mean.for.intercept = 0,
+                         prior.scale.for.intercept = 2.5,
+                         prior.df = 1,
+                         data = data)
+  aoa <- -model$coefficients[["(Intercept)"]] / model$coefficients[["age"]]
+  
+  tibble(definition = data$definition[1],
+         category = data$category[1],
+         bglm_slope = model$coefficients[["age"]],
+         bglm_aoa = aoa)
+}
+
+bglm_aoas <- ms %>%
+  split(.$definition) %>%
+  map(fit_bglm) %>%
+  bind_rows
+
+```
+
+### Get predictors from Braginsky et al. (2019) 
+
+```{r get_predictors}
+## Data of avg_freq
+load("../../../data/aoa_predictors/avg_freq.RData")
+
+## Data from Braginsky et al. (2019)
+load("../../../data/aoa_predictors/model_data.RData")
+load("../../../data/aoa_predictors/uni_joined.RData")
+uni_joined_eng <- uni_joined %>% filter(language == "English (American)")
+
+```
+
+### Get surprisal results from Megachild LSTM
+
+```{r get_surprisal}
+
+file = "../../../data/results/lstm-mega_child/Mega_child.aoa_result.csv"
+df = read.csv(file)
+#Extract child name from file name and add variable.
+file_name = strsplit(file_path_sans_ext(file), "/")[[1]]
+file_name = file_name[(length(file_name))]
+child_name = strsplit(file_name,".aoa_result", fixed=TRUE)[[1]]
+model_surprisals = df %>%
+    mutate(child_name = child_name)
+
+```
+
+### Get frequency counts CHILDES child-directed speech data
+
+```{r get_freq}
+file = "../../../data/results/lstm-mega_child/Mega_child.aoa_freq.csv"
+df = read.csv(file)
+#Extract child name from file name and add variable.
+file_name = strsplit(file_path_sans_ext(file), "/")[[1]]
+file_name = file_name[(length(file_name))]
+child_name = strsplit(file_name,".aoa_freq", fixed=TRUE)[[1]]
+model_freq = df %>%
+    mutate(child_name = child_name)
+
+```
+
+### Combine all predictors into one dataframe. Impute data (i.e. create estimates for missing values) and scale all predictors. 
+
+```{r combine_pred}
+
+surp_model_data <- model_surprisals %>% left_join(model_freq) %>% 
+  mutate(avg_freq = frequency_count) %>% 
+  select(uni_lemma, avg_surprisal, avg_freq, child_name) %>% 
+  mutate(uni_lemma = as.character(uni_lemma)) %>% 
+  left_join(ungroup(model_data)) %>% 
+  group_by(child_name) %>%
+  # mutate_at(vars(!!predictors), funs(as.numeric(scale(.)))) %>%
+  nest()
+
+predictors <- c("avg_surprisal", "avg_freq", "frequency", "MLU", "final_frequency", "solo_frequency", "num_phons", "concreteness", "valence", "arousal", "babiness")
+
+pred_sources <- list(
+  c("avg_surprisal", "avg_freq"),
+  c("frequency", "MLU", "final_frequency", "solo_frequency"),
+  c("valence", "arousal"),
+  "concreteness", "babiness", "num_phons"
+)
+
+fit_predictor <- function(pred, d) {
+  xs <- pred_sources %>% discard(~pred %in% .x) %>% unlist()
+  x_str <- xs %>% paste(collapse = " + ")
+  lm(as.formula(glue("{pred} ~ {x_str}")), data = d) %>%
+    augment(newdata = d) %>%
+    select(uni_lemma, lexical_category, .fitted)
+}
+
+max_steps <- 20
+iterate_predictors <- function(lang_data) {
+  missing <- lang_data %>%
+    gather(predictor, value, !!predictors) %>%
+    mutate(missing = is.na(value)) %>%
+    select(-value) %>%
+    spread(predictor, missing)
+  predictor_order <- lang_data %>%
+    gather(predictor, value, !!predictors) %>%
+    group_by(predictor) %>%
+    summarise(num_na = sum(is.na(value))) %>%
+    filter(num_na != 0) %>%
+    arrange(num_na) %>%
+    pull(predictor)
+  imputation_data <- lang_data %>%
+    mutate_at(vars(!!predictors),
+              funs(as.numeric(Hmisc::impute(., fun = "random"))))
+  for (i in 0:max_steps) {
+    pred <- predictor_order[(i %% length(predictor_order)) + 1]
+    imputation_fits <- fit_predictor(pred, imputation_data)
+    imputation_data <- missing %>%
+      select(uni_lemma, lexical_category, !!pred) %>%
+      rename(missing = !!pred) %>%
+      right_join(imputation_data) %>%
+      left_join(imputation_fits) %>%
+      mutate_at(vars(pred), funs(if_else(is.na(missing), .fitted, .))) %>%
+      select(-.fitted, -missing)
+  }
+  return(imputation_data)
+}
+
+model_data_imputed <- surp_model_data %>%
+  mutate(imputed = map(data, iterate_predictors)) 
+
+all_predictors_data <- model_data_imputed %>%
+  select(-data) %>%
+  unnest() %>%
+  group_by(child_name) %>%
+  mutate_at(vars(predictors), funs(as.numeric(scale(.))))
+
+
+#save(model_data_imputed, file = "../../../data/aoa_predictors/model_data_imputed_mega_child.RData")
+#save(all_predictors_data, file = "../../../data/aoa_predictors/all_predictors_data_mega_child.RData")
+
+```
+
+Join AoA estimates (dependent variable) to predictors together
+
+```{r join_data}
+
+aoa_estimates <- bglm_aoas %>% 
+  mutate(words = tolower(definition),
+         aoa = bglm_aoa) %>% 
+  select(words, aoa)
+
+#aoa_estimates <- empirical_aoas %>% 
+#  mutate(words = tolower(definition),
+#         aoa = empirical_aoa) %>% 
+#  select(words, aoa)
+
+data <- all_predictors_data %>% 
+  left_join(aoa_estimates) %>% 
+  filter(!is.na(aoa)) %>% 
+  filter(lexical_category != "other") %>% ungroup()
+  
+#save(data, file = "../../../data/aoa_predictors/data_mega_child.RData")
+
+```
