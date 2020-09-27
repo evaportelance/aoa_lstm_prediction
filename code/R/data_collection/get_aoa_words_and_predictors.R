@@ -8,7 +8,7 @@ library(lme4)
 library(modelr)
 library(purrr)
 
-load("../../data/aoa_predictors/uni_joined.RData")
+load("../../../data/aoa_predictors/uni_joined.RData")
 uni_joined_eng <- uni_joined %>% filter(language == "English (American)")
 
 predictors <- c("frequency", "MLU", "final_frequency", "solo_frequency",
@@ -33,6 +33,6 @@ df.model_data<- model_data %>%
 
 df.uni_lemma <- df.model_data %>% select(word_clean, uni_lemma)
 
-write.table(df.uni_lemma, file=paste("../../data/aoa_predictors/aoa_words.csv"), sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+write.table(df.uni_lemma, file=paste("../../../data/aoa_predictors/aoa_words.csv"), sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
 
-save(model_data, file = "../../data/aoa_predictors/model_data.RData")
+save(model_data, file = "../../../data/aoa_predictors/model_data.RData")

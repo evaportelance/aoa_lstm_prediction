@@ -160,8 +160,8 @@ corrplot(M, method="color",
          # hide correlation coefficient on the principal diagonal
          diag=FALSE 
          )
-#ggsave("corrplot_megachild.png",plot=p, width = 6, height = 5, units="in", limitsize = FALSE)
-
+#ggsave("corrplot_megachild.png", width = 6, height = 5, units="in", limitsize = FALSE)
+dev.off()
 ```
 
 Do colinearity analysis

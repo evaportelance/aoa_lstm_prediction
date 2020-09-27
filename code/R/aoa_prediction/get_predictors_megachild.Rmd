@@ -60,8 +60,6 @@ bglm_aoas <- ms %>%
 ### Get predictors from Braginsky et al. (2019) 
 
 ```{r get_predictors}
-## Data of avg_freq
-load("../../../data/aoa_predictors/avg_freq.RData")
 
 ## Data from Braginsky et al. (2019)
 load("../../../data/aoa_predictors/model_data.RData")
