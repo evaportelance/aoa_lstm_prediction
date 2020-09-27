@@ -161,7 +161,7 @@ corrplot(M, method="color",
          diag=FALSE 
          )
 #ggsave("corrplot_megachild.png",plot=p, width = 6, height = 5, units="in", limitsize = FALSE)
-
+dev.off()
 ```
 
 Do colinearity analysis
